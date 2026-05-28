@@ -1,0 +1,17 @@
+# Veri & çıktılar — repoya GİRMEZ
+data/
+results/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env/
+env/
+*.egg-info/
+.ipynb_checkpoints/
+
+# OS
+.DS_Store
+.vscode
