@@ -1,5 +1,5 @@
 """
-Module for V0 running script.
+Module for visual odometry running script.
 """
 
 import sys
