@@ -4,6 +4,7 @@ Module for image geometry.
 
 import cv2
 import numpy as np
+from scipy.optimize import least_squares
 
 
 def estimate_essential_matrix(pts1, pts2, K):
@@ -81,3 +82,128 @@ def solve_pnp(pts_3d, pts_2d, K, dist_coeffs=None):
     R, _ = cv2.Rodrigues(rvec)
     
     return R, tvec, inliers
+
+
+def reproject_point(point_3d, pose_4x4, K):
+    """
+    Projects a 3D point to a 2D pixel coordinate using the camera pose.
+    
+    Args:
+        point_3d: (3,) numpy array representing the 3D point in world coordinates.
+        pose_4x4: (4, 4) numpy array representing the world-to-camera transformation.
+        K: (3, 3) intrinsic camera matrix.
+        
+    Returns:
+        (2,) numpy array representing the estimated [u, v] pixel coordinate.
+    """
+    # Convert 3D point to homogeneous coordinates: [X, Y, Z, 1]
+    point_3d_hom = np.append(point_3d, 1.0)
+    
+    # Transform the point from World to Camera coordinate system
+    point_cam_hom = pose_4x4 @ point_3d_hom
+    
+    # Guard: If the point is behind the camera (Z <= 0), return an invalid pixel
+    if point_cam_hom[2] <= 0:
+        return np.array([-1.0, -1.0]) 
+    
+    # Normalize by Z (Zc) to project onto the normalized image plane
+    point_cam_norm = point_cam_hom[:3] / point_cam_hom[2]
+    
+    # Apply the camera intrinsic matrix to get final pixel coordinates
+    pixel_hom = K @ point_cam_norm
+    
+    return pixel_hom[:2]
+
+
+def reprojection_error(params, points_3d, observed_pixels, K):
+    """
+    Calculates the reprojection error for all observations. 
+    This function is iteratively called by scipy.optimize.least_squares.
+    
+    Args:
+        params: (6,) flat array [rvec (3,), tvec (3,)].
+        points_3d: (N, 3) fixed 3D points from the map.
+        observed_pixels: (N, 2) actual 2D pixel observations in the current frame.
+        K: (3, 3) intrinsic camera matrix.
+        
+    Returns:
+        (2N,) flat array containing the [du, dv] errors for each observation.
+    """
+    rvec = params[:3]
+    tvec = params[3:]
+    
+    # Convert Rodrigues rotation vector (3,) back to a 3x3 Rotation Matrix
+    R, _ = cv2.Rodrigues(rvec)
+    
+    # Construct the 4x4 World-to-Camera pose matrix
+    pose = np.eye(4)
+    pose[:3, :3] = R
+    pose[:3, 3] = tvec
+    
+    residuals = []
+    
+    # Calculate the error for each 3D point and its corresponding observation
+    for pt_3d, obs_pixel in zip(points_3d, observed_pixels):
+        
+        # Reproject the 3D point onto the image plane using the estimated pose
+        rep_pixel = reproject_point(pt_3d, pose, K)
+        
+        # Heavily penalize points that project behind the camera to guide the optimizer away
+        if rep_pixel[0] < 0:
+            error = np.array([1e6, 1e6]) 
+        else:
+            # The residual is the difference between the observed and reprojected pixels
+            error = obs_pixel - rep_pixel
+            
+        residuals.append(error)
+        
+    # SciPy expects a flattened 1D array of residuals (length 2N)
+    return np.concatenate(residuals)
+
+
+def motion_only_ba(initial_pose, points_3d, observed_pixels, K):
+    """
+    Motion-only Bundle Adjustment. Optimizes ONLY the camera pose while keeping 
+    the 3D map points fixed.
+    
+    Args:
+        initial_pose: (4, 4) initial pose estimate (e.g., from PnP).
+        points_3d: (N, 3) fixed 3D map points.
+        observed_pixels: (N, 2) corresponding 2D pixel locations in the current frame.
+        K: (3, 3) intrinsic camera matrix.
+        
+    Returns:
+        refined_pose: (4, 4) optimized world-to-camera pose.
+    """
+    # Extract Rotation (R) and Translation (t) from the initial 4x4 guess
+    R_init = initial_pose[:3, :3]
+    t_init = initial_pose[:3, 3]
+    
+    # Convert the Rotation matrix to a Rodrigues vector
+    rvec_init, _ = cv2.Rodrigues(R_init)
+    rvec_init = rvec_init.ravel()
+    
+    # Flatten parameters into a single (6,) array: [rvec, tvec]
+    initial_params = np.hstack((rvec_init, t_init))
+    
+    # Run the optimization using the Levenberg-Marquardt (lm) algorithm
+    result = least_squares(
+        reprojection_error, 
+        initial_params, 
+        method='lm', 
+        args=(points_3d, observed_pixels, K),
+        verbose=0  # Set to 2 if you want to see optimization logs during isolated tests
+    )
+    
+    # Reconstruct the refined 4x4 pose matrix from the optimized parameters
+    refined_params = result.x
+    rvec_refined = refined_params[:3]
+    tvec_refined = refined_params[3:]
+    
+    R_refined, _ = cv2.Rodrigues(rvec_refined)
+    
+    refined_pose = np.eye(4)
+    refined_pose[:3, :3] = R_refined
+    refined_pose[:3, 3] = tvec_refined
+    
+    return refined_pose

@@ -1,75 +1,80 @@
 """
-Module for visual odometry.
+Module for visual odometry with persistent map and local BA.
 """
 
 import numpy as np
 import cv2
 from .features import extract_features, match_features, get_matched_points
 from .geometry import triangulate, solve_pnp
+from .mapping import Map
 
 
 class VisualOdometry:
     """
-    Stereo Visual Odometry class using Frame-to-Frame Tracking (Interval=1).
+    Stereo Visual Odometry class with a Persistent Map and Bundle Adjustment.
     """
-    # We are defaulting keyframe_interval to 1 to enforce Frame-to-Frame tracking.
-    # This prevents the local map from decaying rapidly, significantly improving scale.
-    def __init__(self, dataset, keyframe_interval=1):
+    
+    def __init__(self, dataset, keyframe_interval=5):
         self.ds = dataset
         self.K = dataset.K
         self.P_left = dataset.P_left
         self.P_right = dataset.P_right
+        
         self.keyframe_interval = keyframe_interval
         
-        # Global trajectory history -> (N, 3)
-        self.trajectory = []  
-
-        # Map state — built map based on the last keyframe
-        self.map_points = None                # (M, 3) — 3D points, LAST KEYFRAME coord. system
-        self.map_descriptors = None           # (M, 32) — corresponding left camera descriptors
-        self.T_keyframe_to_world = np.eye(4)  # Last keyframe's pose with respect to the world
-
+        # M3: The persistent map replaces the temporary variables
+        self.map = Map()                     
+        self.trajectory = []
+        self.last_keyframe_id = None
+    
     def process(self):
         """
         Runs the full VO pipeline over the dataset.
         """
         self.trajectory = []
         
-        # Initialize the first frame as the first keyframe (Origin)
-        self._build_map(frame_idx=0)
-        T_global = np.eye(4)
-        self.trajectory.append(T_global[:3, 3].copy())
+        print("\n--- Starting Stereo VO (M3: Persistent Map + BA) ---")
         
-        total_frames = len(self.ds)
-        print(f"\n--- Starting Stereo VO (Total Frames: {total_frames}) ---")
+        # Initialize the first frame as the first keyframe
+        self._initialize(frame_idx=0)
         
-        for i in range(1, total_frames):
-            # Track: Where is the camera relative to the last keyframe?
-            T_curr_to_kf = self._track(i)
+        for i in range(1, len(self.ds)):
+            # Tracking: localize the new frame against the existing map using PnP + BA
+            track_result = self._track(i)
             
-            # Establish global pose: keyframe's global pose x camera's relative pose
-            T_global = self.T_keyframe_to_world @ T_curr_to_kf
-            self.trajectory.append(T_global[:3, 3].copy())
+            tracking_lost = False # Takip durumunu tutacak bayrak
             
-            # Keyframe update criterion (Interval=1 means EVERY frame is a keyframe)
-            if i % self.keyframe_interval == 0:
-                self.T_keyframe_to_world = T_global.copy()
-                self._build_map(frame_idx=i)
-                
+            if track_result is None:
+                print(f"Warning: Tracking lost at frame {i}. Using last known pose.")
+                T_world_to_cam = self.map.keyframes[self.last_keyframe_id].pose.copy()
+                tracked_point_ids = []
+                matched_kps = []
+                tracking_lost = True # Takip koptu!
+            else:
+                T_world_to_cam, tracked_point_ids, matched_kps = track_result
+            
+            # Extract camera position
+            T_cam_to_world = np.linalg.inv(T_world_to_cam)
+            cam_position = T_cam_to_world[:3, 3]
+            self.trajectory.append(cam_position.copy())
+            
+            # KRİTİK DÜZELTME: Eğer takip koptuysa asla keyframe ekleme!
+            if not tracking_lost and self._should_add_keyframe(i, T_world_to_cam):
+                self._add_keyframe(i, T_world_to_cam, tracked_point_ids, matched_kps)
+            
             # Progress print
-            if i % 20 == 0 or i == total_frames - 1:
-                progress = (i / (total_frames - 1)) * 100
-                print(f"Tracking Progress: {i}/{total_frames - 1} [{progress:.1f}%]")
+            if i % 20 == 0 or i == len(self.ds) - 1:
+                progress = (i / (len(self.ds) - 1)) * 100
+                print(f"Tracking Progress: {i}/{len(self.ds) - 1} [{progress:.1f}%]")
         
         print("Visual Odometry processing complete!\n")
         return np.array(self.trajectory)
     
-    def _build_map(self, frame_idx):
+    def _initialize(self, frame_idx):
         """
-        Triangulates stereo pairs and stores 3D points & descriptors.
-        Side effect: Updates self.map_points and self.map_descriptors.
+        Establishes the first keyframe and builds the initial map.
         """
-        # Extract features + match + get matched points
+        # Read stereo frame, extract features, and match
         img_L, img_R = self.ds.get_stereo_frame(frame_idx)
         kp_L, desc_L = extract_features(img_L)
         kp_R, desc_R = extract_features(img_R)
@@ -77,45 +82,146 @@ class VisualOdometry:
         matches = match_features(desc_L, desc_R)
         pts_L, pts_R = get_matched_points(kp_L, kp_R, matches)
         
-        # Triangulate (Z > 0 and Z < 100 filter applies inside)
+        # Triangulate to get 3D points
         pts_3d_valid, valid_mask = triangulate(pts_L, pts_R, self.P_left, self.P_right, max_depth=100)
         
-        # Descriptor sync: collect left descriptors using the matches sequence
-        matched_desc_L = np.array([desc_L[m.queryIdx] for m in matches])  # (N, 32)
-        matched_desc_L = matched_desc_L[valid_mask]                       # (M, 32)
+        # Filter descriptors and keypoints using the valid mask
+        valid_desc_L = np.array([desc_L[m.queryIdx] for m in matches])[valid_mask]
+        valid_kp_L = pts_L[valid_mask]
         
-        self.map_points = pts_3d_valid
-        self.map_descriptors = matched_desc_L
+        # Add the initial keyframe to the map (Pose is Identity: W->C)
+        initial_pose = np.eye(4)
+        kf_id = self.map.add_keyframe(initial_pose)
+        self.last_keyframe_id = kf_id
+        
+        # Add all valid 3D points to the map and link them to the keyframe
+        for i in range(len(pts_3d_valid)):
+            self.map.add_point(
+                position_3d=pts_3d_valid[i], 
+                descriptor=valid_desc_L[i], 
+                kf_id=kf_id, 
+                pixel_2d=valid_kp_L[i]
+            )
+            
+        # Add origin to trajectory
+        self.trajectory.append(np.zeros(3))
+        print(f"Initialized map with {len(pts_3d_valid)} points at Frame {frame_idx}.")
     
     def _track(self, frame_idx):
         """
-        Solves camera pose against the local map using PnP.
-        Returns: T_curr_to_keyframe (4×4) — camera pose relative to the last keyframe.
+        Localizes the new frame against the existing map using PnP and Motion-Only BA.
+        Returns: 
+            T_world_to_cam (4x4), list of matched map point IDs, and their 2D pixel coordinates.
+            Returns None if tracking fails.
         """
-        # Read the current left image and extract features
+        # Extract features from the current left image
         img_L = cv2.imread(self.ds.frame_paths[frame_idx], cv2.IMREAD_GRAYSCALE)
         kp_curr, desc_curr = extract_features(img_L)
         
-        # Map ↔ current frame matching
-        matches = match_features(self.map_descriptors, desc_curr)
+        # Get all active descriptors from the persistent map
+        map_descs, map_pt_ids = self.map.get_active_descriptors(10)
         
-        # queryIdx → map index (3D), trainIdx → curr frame keypoint (2D)
-        # MUST BE FLOAT32 FOR OPENCV PnP
-        obj_pts = np.array([self.map_points[m.queryIdx] for m in matches], dtype=np.float32)    
-        img_pts = np.array([kp_curr[m.trainIdx].pt for m in matches], dtype=np.float32)         
+        if len(map_descs) == 0:
+            return None
+            
+        # Match map descriptors with current frame descriptors
+        matches = match_features(map_descs, desc_curr)
         
+        if len(matches) < 10:
+            return None
+            
+        # Prepare data for PnP
+        obj_pts = []
+        img_pts = []
+        tracked_pt_ids = []
+        
+        for m in matches:
+            map_idx = m.queryIdx
+            curr_idx = m.trainIdx
+            
+            pt_id = map_pt_ids[map_idx]
+            obj_pts.append(self.map.points[pt_id].position)
+            img_pts.append(kp_curr[curr_idx].pt)
+            tracked_pt_ids.append(pt_id)
+            
+        obj_pts = np.array(obj_pts, dtype=np.float32)
+        img_pts = np.array(img_pts, dtype=np.float32)
+        
+        # Solve PnP to get an initial pose guess
         R, t, inliers = solve_pnp(obj_pts, img_pts, self.K)
         
-        # Tracking check: if PnP fails or has too few inliers, return Identity (No movement)
         if R is None or inliers is None or len(inliers) < 10:
-            print(f"Warning: Tracking lost at frame {frame_idx}! (Inliers: {len(inliers) if inliers is not None else 0})")
-            return np.eye(4)
+            return None
+            
+        initial_pose = np.eye(4)
+        initial_pose[:3, :3] = R
+        initial_pose[:3, 3] = t.ravel()
         
-        # PnP returns World->Camera (W→C) pose. We need Camera->World (C→W).
-        # Build 4x4 matrix and invert it.
-        T_pnp = np.eye(4)
-        T_pnp[:3, :3] = R
-        T_pnp[:3, 3] = t.ravel()
-        T_curr_to_keyframe = np.linalg.inv(T_pnp)
+        # Extract inliers to ensure stability for downstream steps
+        inlier_idx = inliers.ravel()
+        obj_pts_inliers = obj_pts[inlier_idx]
+        img_pts_inliers = img_pts[inlier_idx]
+        tracked_pt_ids_inliers = [tracked_pt_ids[i] for i in inlier_idx]
         
-        return T_curr_to_keyframe
+        T_pnp = initial_pose
+            
+        # Because our map is now in GLOBAL WORLD coordinates, T_pnp is exactly T_world_to_cam.
+        # We return it directly without inverting it here.
+        return T_pnp, tracked_pt_ids_inliers, img_pts_inliers
+    
+    def _should_add_keyframe(self, frame_idx, current_pose):
+        """
+        Determines if a new keyframe should be spawned.
+        Simple heuristic: Every N frames.
+        """
+        return frame_idx % self.keyframe_interval == 0
+    
+    def _add_keyframe(self, frame_idx, T_world_to_cam, tracked_point_ids, matched_kps):
+        """
+        Spawns a new keyframe:
+        - Registers the keyframe in the map.
+        - Adds observations for existing tracked points.
+        - Triangulates new stereo features to expand the map.
+        """
+        # Add the new keyframe to the map
+        kf_id = self.map.add_keyframe(T_world_to_cam)
+        self.last_keyframe_id = kf_id
+        
+        # Record observations for the points we successfully tracked
+        for pt_id, pixel in zip(tracked_point_ids, matched_kps):
+            self.map.add_observation(pt_id, kf_id, pixel)
+            
+        # Read stereo images to find NEW points (Map Expansion)
+        img_L, img_R = self.ds.get_stereo_frame(frame_idx)
+        kp_L, desc_L = extract_features(img_L)
+        kp_R, desc_R = extract_features(img_R)
+        
+        matches = match_features(desc_L, desc_R)
+        pts_L, pts_R = get_matched_points(kp_L, kp_R, matches)
+        
+        pts_3d_valid, valid_mask = triangulate(pts_L, pts_R, self.P_left, self.P_right, max_depth=100)
+        
+        valid_desc_L = np.array([desc_L[m.queryIdx] for m in matches])[valid_mask]
+        valid_kp_L = pts_L[valid_mask]
+        
+        # Transform the newly triangulated points (which are in the local Camera frame)
+        # into the Global World frame using the inverted pose.
+        T_cam_to_world = np.linalg.inv(T_world_to_cam)
+        
+        new_points_added = 0
+        for i in range(len(pts_3d_valid)):
+            # Convert local 3D point to homogeneous, transform to world, and convert back
+            pt_local_hom = np.append(pts_3d_valid[i], 1.0)
+            pt_world_hom = T_cam_to_world @ pt_local_hom
+            pt_world = pt_world_hom[:3] / pt_world_hom[3]
+            
+            # Add the new point to the map
+            self.map.add_point(
+                position_3d=pt_world, 
+                descriptor=valid_desc_L[i], 
+                kf_id=kf_id, 
+                pixel_2d=valid_kp_L[i]
+            )
+            new_points_added += 1
+            
+        # print(f"Added Keyframe {kf_id} | Tracked {len(tracked_point_ids)} pts | Spawned {new_points_added} new pts.")
