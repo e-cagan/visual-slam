@@ -82,4 +82,5 @@ def draw_matched_features(img1, img2, kp1, kp2, matches, num_matches=50):
     # Doesn't quit until a key pressed
     cv2.waitKey(0)
     cv2.destroyAllWindows()
+    
     return drawn_img

@@ -66,4 +66,5 @@ class VisualOdometry:
 
         # Convert trajectory to numpy array
         print("Visual Odometry processing complete!")
+        
         return np.array(self.trajectory)
