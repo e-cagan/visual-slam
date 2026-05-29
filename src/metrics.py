@@ -27,7 +27,23 @@ def align_scale(est, gt):
     return est_aligned, scale
 
 
-def compute_ate(est, gt):
+def compute_ate_raw(est, gt):
+    """
+    Computes the raw Absolute Trajectory Error (RMSE) WITHOUT scale alignment.
+    This tests the true metric scale accuracy of the Stereo VO pipeline.
+    
+    Returns: ATE (float)
+    """
+    # Take the difference between matricies without scaling
+    diffs = est - gt
+    
+    # Calculate RMSE (Root Mean Square Error)
+    ate = np.sqrt(np.mean(np.sum(diffs**2, axis=1)))
+    
+    return ate
+
+
+def compute_ate_aligned(est, gt):
     """
     Computes the Absolute Trajectory Error (RMSE) after scale alignment.
     Returns: ATE (float), est_aligned (N,3)
