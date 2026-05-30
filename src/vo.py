@@ -92,16 +92,39 @@ class VisualOdometry:
         return np.array(self.trajectory)
     
     def _optimize_pose_graph(self):
-        """Build + optimize + apply pose graph."""
+        """Build pose graph from current state, optimize, apply back."""               
         graph, initial = build_pose_graph(self.map, self.loop_closures)
         optimized = optimize_pose_graph(graph, initial)
         apply_optimized_poses(self.map, optimized)
     
     def _rebuild_trajectory(self):
-        """Pose graph optimization sonrası trajectory'yi keyframe pozlarından yeniden kur."""
-        # Şu an trajectory her frame için kaydedildi, ama keyframe'ler arası kareler için 
-        # interpolasyon ya da basitçe sadece keyframe pozlarını kullan
-        ...
+        """
+        Rebuild trajectory from current keyframe poses after pose graph optimization.
+        Uses keyframe frame_idx to align with ground truth.
+        """
+        # Build full-length trajectory by mapping each frame to its nearest preceding keyframe
+        # For simplicity: trajectory at each frame = pose interpolated from keyframes
+        # Naive version: just use keyframe positions and rebuild based on frame_idx
+        
+        # Sort keyframes by frame_idx
+        kfs_sorted = sorted(self.map.keyframes.values(), key=lambda kf: kf.frame_idx)
+        
+        new_trajectory = []
+        kf_iter = iter(kfs_sorted)
+        current_kf = next(kf_iter)
+        next_kf = next(kf_iter, None)
+        
+        for i in range(len(self.ds)):
+            # Advance to the latest keyframe with frame_idx <= i
+            while next_kf is not None and next_kf.frame_idx <= i:
+                current_kf = next_kf
+                next_kf = next(kf_iter, None)
+            
+            # Use current_kf's pose for this frame
+            T_cam_to_world = np.linalg.inv(current_kf.pose)
+            new_trajectory.append(T_cam_to_world[:3, 3].copy())
+        
+        self.trajectory = new_trajectory
     
     def _initialize(self, frame_idx):
         """
@@ -124,7 +147,8 @@ class VisualOdometry:
         
         # Add the initial keyframe to the map (Pose is Identity: W->C)
         initial_pose = np.eye(4)
-        kf_id = self.map.add_keyframe(initial_pose, keypoints=kp_L, descriptors=desc_L)
+        kf_id = self.map.add_keyframe(initial_pose, frame_idx=frame_idx, 
+                               keypoints=kp_L, descriptors=desc_L)
         self.last_keyframe_id = kf_id
         
         # Add all valid 3D points to the map and link them to the keyframe
@@ -227,7 +251,8 @@ class VisualOdometry:
         kp_R, desc_R = extract_features(img_R)
         
         # Now add the keyframe to the map WITH its keypoints and descriptors
-        kf_id = self.map.add_keyframe(T_world_to_cam, keypoints=kp_L, descriptors=desc_L)
+        kf_id = self.map.add_keyframe(T_world_to_cam, frame_idx=frame_idx,
+                               keypoints=kp_L, descriptors=desc_L)
         self.last_keyframe_id = kf_id
         
         # Record observations for the points we successfully tracked

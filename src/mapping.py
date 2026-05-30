@@ -36,9 +36,10 @@ class Keyframe:
     
     Local BA optimizes these keyframes and the 3D points they observe together.
     """
-    def __init__(self, keyframe_id, pose_4x4, keypoints, descriptors, image=None):
+    def __init__(self, keyframe_id, pose_4x4, keypoints, descriptors, frame_idx=None, image=None):
         self.id = keyframe_id
         self.pose = pose_4x4.astype(np.float64)  # 4x4, world-to-camera or camera-to-world
+        self.frame_idx = frame_idx
         self.observed_point_ids = set()          # IDs of MapPoints observed by this keyframe
         self.keypoints = keypoints               # Keypoints of the keyframe
         self.descriptors = descriptors           # Descriptors of the keyframe
@@ -57,10 +58,12 @@ class Map:
         self.next_point_id = 0
         self.next_kf_id = 0
     
-    def add_keyframe(self, pose_4x4, keypoints=None, descriptors=None, image=None):
+    def add_keyframe(self, pose_4x4, frame_idx=None, keypoints=None, descriptors=None, image=None):
         """Adds a new keyframe to the map and returns its ID."""
         kf_id = self.next_kf_id
-        new_kf = Keyframe(kf_id, pose_4x4, keypoints, descriptors, image)
+        new_kf = Keyframe(kf_id, pose_4x4, frame_idx=frame_idx, keypoints=keypoints, descriptors=descriptors, image=image)
+        new_kf.keypoints = keypoints
+        new_kf.descriptors = descriptors
         self.keyframes[kf_id] = new_kf
         
         self.next_kf_id += 1
