@@ -141,7 +141,7 @@ class VisualOdometry:
 
         # Enable loop detector based on argument
         if self.enable_loop_closure:
-            self.loop_detector = LoopDetector(self.map)
+            self.loop_detector = LoopDetector(self.map, self.K)
 
         print(f"Initialized map with {len(pts_3d_valid)} points at Frame {frame_idx}.")
     
