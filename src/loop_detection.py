@@ -51,6 +51,20 @@ class LoopDetector:
         if not eligible_ids:
             return None
         
+        # DEBUG: similarity scores for top-5 candidates
+        sims = []
+        for kf_id in eligible_ids:
+            sim = self._compute_similarity(current_kf_id, kf_id)
+            sims.append((kf_id, sim))
+        
+        sims.sort(key=lambda x: x[1], reverse=True)
+        
+        # Print only when periodically (every 50th keyframe) or when something interesting
+        if current_kf_id % 50 == 0:
+            top5 = sims[:5]
+            print(f"  [KF {current_kf_id}] top-5 sims: " + 
+                ", ".join([f"KF{kf}={s:.3f}" for kf, s in top5]))
+        
         # Appearance similarity for each candidate
         candidates = []
         for kf_id in eligible_ids:

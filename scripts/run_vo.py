@@ -15,8 +15,8 @@ from src.visualization import plot_trajectories
 from src.metrics import compute_ate_aligned, compute_ate_raw
 
 if __name__ == '__main__':
-    # 1. Dataset and Ground-Truth (GT) loading
-    ds = KittiDataset(sequence_id="04", base_path="data/dataset")
+    # Dataset and Ground-Truth (GT) loading
+    ds = KittiDataset(sequence_id="00", base_path="data/dataset")
     gt_traj = ds.get_trajectory()
     
     # Run tracking on every frame for maximum stability
@@ -26,20 +26,20 @@ if __name__ == '__main__':
     print("          M3: VISUAL ODOMETRY RUN          ")
     print("===========================================\n")
 
-    # 2. Initialize and run Visual Odometry
+    # Initialize and run Visual Odometry
     vo = VisualOdometry(ds, keyframe_interval=kf_interval)
     est_traj = vo.process()
     
-    # 3. Calculate metrics
+    # Calculate metrics
     ate_raw = compute_ate_raw(est_traj, gt_traj)
     _, scale = compute_ate_aligned(est_traj, gt_traj)
     
-    # 4. Report results
+    # Report results
     print("\n===========================================")
     print("             FINAL M3 METRICS              ")
     print("===========================================")
     print(f"Scale Factor: {scale:.4f}")
     print(f"Raw ATE     : {ate_raw:.4f} meters")
     
-    # 5. Visualization
+    # Visualization
     plot_trajectories(est_traj, gt_traj, title="M3: Persistent Map VO vs GT")

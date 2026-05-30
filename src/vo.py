@@ -16,7 +16,7 @@ class VisualOdometry:
     Stereo Visual Odometry class with a Persistent Map and Bundle Adjustment.
     """
     
-    def __init__(self, dataset, keyframe_interval=5, enable_loop_closure=True):
+    def __init__(self, dataset, keyframe_interval=2, enable_loop_closure=True):
         self.ds = dataset
         self.K = dataset.K
         self.P_left = dataset.P_left
@@ -55,6 +55,10 @@ class VisualOdometry:
                 tracked_point_ids = []
                 matched_kps = []
                 tracking_lost = True # Takip koptu!
+
+                if not hasattr(self, '_first_lost_frame'):
+                    self._first_lost_frame = i
+                    print(f"  ⚠️ FIRST tracking lost at frame {i}")
             else:
                 T_world_to_cam, tracked_point_ids, matched_kps = track_result
             
@@ -81,7 +85,7 @@ class VisualOdometry:
                         self._optimize_pose_graph()
                         
                         # Rebuild the trajectory since the keyframe poses changed
-                        self._rebuild_trajectory()
+                        self._rebuild_trajectory(i)
             
             # Progress print
             if i % 20 == 0 or i == len(self.ds) - 1:
@@ -97,16 +101,8 @@ class VisualOdometry:
         optimized = optimize_pose_graph(graph, initial)
         apply_optimized_poses(self.map, optimized)
     
-    def _rebuild_trajectory(self):
-        """
-        Rebuild trajectory from current keyframe poses after pose graph optimization.
-        Uses keyframe frame_idx to align with ground truth.
-        """
-        # Build full-length trajectory by mapping each frame to its nearest preceding keyframe
-        # For simplicity: trajectory at each frame = pose interpolated from keyframes
-        # Naive version: just use keyframe positions and rebuild based on frame_idx
-        
-        # Sort keyframes by frame_idx
+    def _rebuild_trajectory(self, current_frame_idx):
+        """Rebuild trajectory up to current frame using keyframe poses."""
         kfs_sorted = sorted(self.map.keyframes.values(), key=lambda kf: kf.frame_idx)
         
         new_trajectory = []
@@ -114,13 +110,10 @@ class VisualOdometry:
         current_kf = next(kf_iter)
         next_kf = next(kf_iter, None)
         
-        for i in range(len(self.ds)):
-            # Advance to the latest keyframe with frame_idx <= i
+        for i in range(current_frame_idx + 1):  # ← şimdiye kadar
             while next_kf is not None and next_kf.frame_idx <= i:
                 current_kf = next_kf
                 next_kf = next(kf_iter, None)
-            
-            # Use current_kf's pose for this frame
             T_cam_to_world = np.linalg.inv(current_kf.pose)
             new_trajectory.append(T_cam_to_world[:3, 3].copy())
         
@@ -181,7 +174,7 @@ class VisualOdometry:
         kp_curr, desc_curr = extract_features(img_L)
         
         # Get all active descriptors from the persistent map
-        map_descs, map_pt_ids = self.map.get_active_descriptors(10)
+        map_descs, map_pt_ids = self.map.get_active_descriptors(recent_keyframes=30)
         
         if len(map_descs) == 0:
             return None
@@ -213,6 +206,24 @@ class VisualOdometry:
         R, t, inliers = solve_pnp(obj_pts, img_pts, self.K)
         
         if R is None or inliers is None or len(inliers) < 10:
+            return None
+        
+        # SANITY CHECK — PnP returned a sensible pose?
+        # Translation step should be small per frame (KITTI 00 ~1m/frame)
+        # Previous keyframe position:
+        prev_pose = self.map.keyframes[self.last_keyframe_id].pose
+        prev_cam_world = np.linalg.inv(prev_pose)[:3, 3]
+
+        # Current camera position from PnP:
+        candidate_pose = np.eye(4)
+        candidate_pose[:3, :3] = R
+        candidate_pose[:3, 3] = t.ravel()
+        curr_cam_world = np.linalg.inv(candidate_pose)[:3, 3]
+
+        # Distance between consecutive estimates
+        step = np.linalg.norm(curr_cam_world - prev_cam_world)
+
+        if step > 10:  # 10m'den fazla atlama = PnP saçma, sahte
             return None
             
         initial_pose = np.eye(4)
@@ -271,11 +282,18 @@ class VisualOdometry:
         # Transform local 3D points to world frame
         T_cam_to_world = np.linalg.inv(T_world_to_cam)
         
+        new_points_added = 0
         for i in range(len(pts_3d_valid)):
             # Convert local 3D point to homogeneous, transform to world, and convert back
             pt_local_hom = np.append(pts_3d_valid[i], 1.0)
             pt_world_hom = T_cam_to_world @ pt_local_hom
             pt_world = pt_world_hom[:3] / pt_world_hom[3]
+
+            # SANITY CHECK — reject points with unreasonable world coordinates
+            if np.any(np.isnan(pt_world)) or np.any(np.isinf(pt_world)):
+                continue
+            if np.linalg.norm(pt_world) > 1000:  # 1km'den uzak → muhtemelen drift sonucu
+                continue
             
             # Add the new point to the map
             self.map.add_point(
@@ -284,3 +302,4 @@ class VisualOdometry:
                 kf_id=kf_id,
                 pixel_2d=valid_kp_L[i]
             )
+            new_points_added += 1
