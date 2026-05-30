@@ -124,7 +124,7 @@ class VisualOdometry:
         
         # Add the initial keyframe to the map (Pose is Identity: W->C)
         initial_pose = np.eye(4)
-        kf_id = self.map.add_keyframe(initial_pose)
+        kf_id = self.map.add_keyframe(initial_pose, keypoints=kp_L, descriptors=desc_L)
         self.last_keyframe_id = kf_id
         
         # Add all valid 3D points to the map and link them to the keyframe
@@ -221,19 +221,20 @@ class VisualOdometry:
         - Adds observations for existing tracked points.
         - Triangulates new stereo features to expand the map.
         """
-        # Add the new keyframe to the map
-        kf_id = self.map.add_keyframe(T_world_to_cam)
+        # Read stereo images and extract features FIRST
+        img_L, img_R = self.ds.get_stereo_frame(frame_idx)
+        kp_L, desc_L = extract_features(img_L)
+        kp_R, desc_R = extract_features(img_R)
+        
+        # Now add the keyframe to the map WITH its keypoints and descriptors
+        kf_id = self.map.add_keyframe(T_world_to_cam, keypoints=kp_L, descriptors=desc_L)
         self.last_keyframe_id = kf_id
         
         # Record observations for the points we successfully tracked
         for pt_id, pixel in zip(tracked_point_ids, matched_kps):
             self.map.add_observation(pt_id, kf_id, pixel)
-            
-        # Read stereo images to find NEW points (Map Expansion)
-        img_L, img_R = self.ds.get_stereo_frame(frame_idx)
-        kp_L, desc_L = extract_features(img_L)
-        kp_R, desc_R = extract_features(img_R)
         
+        # Stereo matching for map expansion
         matches = match_features(desc_L, desc_R)
         pts_L, pts_R = get_matched_points(kp_L, kp_R, matches)
         
@@ -242,11 +243,9 @@ class VisualOdometry:
         valid_desc_L = np.array([desc_L[m.queryIdx] for m in matches])[valid_mask]
         valid_kp_L = pts_L[valid_mask]
         
-        # Transform the newly triangulated points (which are in the local Camera frame)
-        # into the Global World frame using the inverted pose.
+        # Transform local 3D points to world frame
         T_cam_to_world = np.linalg.inv(T_world_to_cam)
         
-        new_points_added = 0
         for i in range(len(pts_3d_valid)):
             # Convert local 3D point to homogeneous, transform to world, and convert back
             pt_local_hom = np.append(pts_3d_valid[i], 1.0)
@@ -255,11 +254,8 @@ class VisualOdometry:
             
             # Add the new point to the map
             self.map.add_point(
-                position_3d=pt_world, 
-                descriptor=valid_desc_L[i], 
-                kf_id=kf_id, 
+                position_3d=pt_world,
+                descriptor=valid_desc_L[i],
+                kf_id=kf_id,
                 pixel_2d=valid_kp_L[i]
             )
-            new_points_added += 1
-            
-        # print(f"Added Keyframe {kf_id} | Tracked {len(tracked_point_ids)} pts | Spawned {new_points_added} new pts.")
