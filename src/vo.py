@@ -5,7 +5,9 @@ Module for visual odometry with persistent map and local BA.
 import numpy as np
 import cv2
 from .features import extract_features, match_features, get_matched_points
+from .pose_graph import build_pose_graph, optimize_pose_graph, apply_optimized_poses
 from .geometry import triangulate, solve_pnp
+from .loop_detection import LoopDetector
 from .mapping import Map
 
 
@@ -14,18 +16,21 @@ class VisualOdometry:
     Stereo Visual Odometry class with a Persistent Map and Bundle Adjustment.
     """
     
-    def __init__(self, dataset, keyframe_interval=5):
+    def __init__(self, dataset, keyframe_interval=5, enable_loop_closure=True):
         self.ds = dataset
         self.K = dataset.K
         self.P_left = dataset.P_left
         self.P_right = dataset.P_right
         
         self.keyframe_interval = keyframe_interval
+        self.enable_loop_closure = enable_loop_closure
         
         # M3: The persistent map replaces the temporary variables
         self.map = Map()                     
         self.trajectory = []
+        self.loop_closures = []
         self.last_keyframe_id = None
+        self.loop_detector = None
     
     def process(self):
         """
@@ -58,9 +63,25 @@ class VisualOdometry:
             cam_position = T_cam_to_world[:3, 3]
             self.trajectory.append(cam_position.copy())
             
-            # KRİTİK DÜZELTME: Eğer takip koptuysa asla keyframe ekleme!
+            # Don't add keyframe if tracking is lost
             if not tracking_lost and self._should_add_keyframe(i, T_world_to_cam):
                 self._add_keyframe(i, T_world_to_cam, tracked_point_ids, matched_kps)
+
+                # Loop closure detection
+                if self.enable_loop_closure and self.last_keyframe_id > 50:
+                    result = self.loop_detector.detect(self.last_keyframe_id)
+                    if result is not None:
+                        matched_kf_id, T_loop = result
+                        self.loop_closures.append(
+                            (self.last_keyframe_id, matched_kf_id, T_loop)
+                        )
+                        print(f"Loop detected: KF {self.last_keyframe_id} ↔ KF {matched_kf_id}")
+                        
+                        # Pose graph optimization
+                        self._optimize_pose_graph()
+                        
+                        # Rebuild the trajectory since the keyframe poses changed
+                        self._rebuild_trajectory()
             
             # Progress print
             if i % 20 == 0 or i == len(self.ds) - 1:
@@ -69,6 +90,18 @@ class VisualOdometry:
         
         print("Visual Odometry processing complete!\n")
         return np.array(self.trajectory)
+    
+    def _optimize_pose_graph(self):
+        """Build + optimize + apply pose graph."""
+        graph, initial = build_pose_graph(self.map, self.loop_closures)
+        optimized = optimize_pose_graph(graph, initial)
+        apply_optimized_poses(self.map, optimized)
+    
+    def _rebuild_trajectory(self):
+        """Pose graph optimization sonrası trajectory'yi keyframe pozlarından yeniden kur."""
+        # Şu an trajectory her frame için kaydedildi, ama keyframe'ler arası kareler için 
+        # interpolasyon ya da basitçe sadece keyframe pozlarını kullan
+        ...
     
     def _initialize(self, frame_idx):
         """
@@ -105,6 +138,11 @@ class VisualOdometry:
             
         # Add origin to trajectory
         self.trajectory.append(np.zeros(3))
+
+        # Enable loop detector based on argument
+        if self.enable_loop_closure:
+            self.loop_detector = LoopDetector(self.map)
+
         print(f"Initialized map with {len(pts_3d_valid)} points at Frame {frame_idx}.")
     
     def _track(self, frame_idx):

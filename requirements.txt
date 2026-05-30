@@ -1,5 +1,6 @@
 # --- Core CV / 3D geometry (M0–M3) ---
-numpy>=1.26
+gtsam
+numpy==1.26
 opencv-python>=4.10      # ORB, essential matrix, PnP, triangulation
 scipy>=1.13              # least_squares (bundle adjustment, M3)
 matplotlib>=3.8          # trajectory plots
