@@ -7,6 +7,7 @@ matplotlib>=3.8          # trajectory plots
 open3d>=0.18             # 3D point cloud / map visualization
 pyyaml>=6.0              # configs/kitti.yaml
 tqdm>=4.66               # progress bars
+lightglue @ git+https://github.com/cvg/LightGlue.git
 
 # --- Test ---
 pytest>=8.0              # testing
